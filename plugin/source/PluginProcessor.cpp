@@ -1,7 +1,13 @@
-#include "YourPluginName/PluginProcessor.h"
+﻿#include "YourPluginName/PluginProcessor.h"
 #include "YourPluginName/PluginEditor.h"
 
 namespace audio_plugin {
+
+// パラメータID
+constexpr auto cutoffId = "cutoff";
+constexpr auto qId = "q";
+constexpr auto filterTypeId = "filterType";
+// AudioProcessorValueTreeStateの初期化
 AudioPluginAudioProcessor::AudioPluginAudioProcessor()
     : AudioProcessor(
           BusesProperties()
@@ -11,7 +17,25 @@ AudioPluginAudioProcessor::AudioPluginAudioProcessor()
 #endif
               .withOutput("Output", juce::AudioChannelSet::stereo(), true)
 #endif
-      ) {
+              ),
+      apvts(*this,
+            nullptr,
+            juce::Identifier("Params"),
+            {std::make_unique<juce::AudioParameterFloat>(
+                 cutoffId,
+                 "Cutoff",
+                 juce::NormalisableRange<float>(20.0f, 20000.0f, 1.0f, 0.5f),
+                 1000.0f),
+             std::make_unique<juce::AudioParameterFloat>(
+                 qId,
+                 "Q",
+                 juce::NormalisableRange<float>(0.1f, 10.0f, 0.01f, 0.5f),
+                 1.0f),
+             std::make_unique<juce::AudioParameterChoice>(
+                 filterTypeId,
+                 "Filter Type",
+                 juce::StringArray{"BandPass", "LowPass"},
+                 0)}) {
 }
 
 AudioPluginAudioProcessor::~AudioPluginAudioProcessor() {}
@@ -74,9 +98,15 @@ void AudioPluginAudioProcessor::changeProgramName(int index,
 
 void AudioPluginAudioProcessor::prepareToPlay(double sampleRate,
                                               int samplesPerBlock) {
-  // Use this method as the place to do any pre-playback
-  // initialisation that you need..
+  // 再生開始時やサンプルレート変更時に呼ばれる初期化処理
   juce::ignoreUnused(sampleRate, samplesPerBlock);
+  size_t numChannels = static_cast<size_t>(getTotalNumInputChannels());
+  xHistory.assign(numChannels, {0.0f, 0.0f});
+  yHistory.assign(numChannels, {0.0f, 0.0f});
+  // パラメータキャッシュを初期化
+  prevCutoff = -1.0f;
+  prevQ = -1.0f;
+  prevFilterType = -1;
 }
 
 void AudioPluginAudioProcessor::releaseResources() {
@@ -113,8 +143,48 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
   juce::ignoreUnused(midiMessages);
 
   juce::ScopedNoDenormals noDenormals;
-  auto totalNumInputChannels = getTotalNumInputChannels();
-  auto totalNumOutputChannels = getTotalNumOutputChannels();
+  size_t totalNumInputChannels =
+      static_cast<size_t>(getTotalNumInputChannels());
+  size_t totalNumOutputChannels =
+      static_cast<size_t>(getTotalNumOutputChannels());
+  float sampleRate = static_cast<float>(getSampleRate());
+
+  // --- ここからフィルタ係数の計算 ---
+  // パラメータ値を取得
+  float cutoffFreq = *apvts.getRawParameterValue(cutoffId);
+  float Q = *apvts.getRawParameterValue(qId);
+  int filterType = static_cast<int>(*apvts.getRawParameterValue(filterTypeId));
+
+  // パラメータが変化したときのみ係数を再計算（安全な浮動小数点比較を使用）
+  constexpr float epsilon = 1e-4f;  // 比較の許容誤差
+  bool isCutoffChanged = std::abs(cutoffFreq - prevCutoff) > epsilon;
+  bool isQChanged = std::abs(Q - prevQ) > epsilon;
+  bool isFilterTypeChanged = filterType != prevFilterType;
+
+  if (isCutoffChanged || isQChanged || isFilterTypeChanged) {
+    float omegaC = 2.0f * static_cast<float>(M_PI) * cutoffFreq / sampleRate;
+    float K = std::tan(omegaC / 2.0f);
+    if (filterType == 0) {  // BandPass
+      float norm = 1.0f / (Q + K + Q * K * K);
+      filterB[0] = K * norm;
+      filterB[1] = 0.0f;
+      filterB[2] = -K * norm;
+      filterA[0] = 1.0f;
+      filterA[1] = (-2.0f * Q + 2.0f * Q * K * K) * norm;
+      filterA[2] = (Q - K + Q * K * K) * norm;
+    } else if (filterType == 1) {  // LowPass
+      float norm = 1.0f / (1.0f + K / Q + K * K);
+      filterB[0] = K * K * norm;
+      filterB[1] = 2.0f * K * K * norm;
+      filterB[2] = K * K * norm;
+      filterA[0] = 1.0f;
+      filterA[1] = 2.0f * (K * K - 1.0f) * norm;
+      filterA[2] = (1.0f - K / Q + K * K) * norm;
+    }
+    prevCutoff = cutoffFreq;
+    prevQ = Q;
+    prevFilterType = filterType;
+  }
 
   // In case we have more outputs than inputs, this code clears any output
   // channels that didn't contain input data, (because these aren't
@@ -122,8 +192,8 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
   // This is here to avoid people getting screaming feedback
   // when they first compile a plugin, but obviously you don't need to keep
   // this code if your algorithm always overwrites all the output channels.
-  for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
-    buffer.clear(i, 0, buffer.getNumSamples());
+  for (size_t i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
+    buffer.clear(static_cast<int>(i), 0, buffer.getNumSamples());
 
   // This is the place where you'd normally do the guts of your plugin's
   // audio processing...
@@ -131,19 +201,47 @@ void AudioPluginAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
   // the samples and the outer loop is handling the channels.
   // Alternatively, you can process the samples with the channels
   // interleaved by keeping the same state.
-  for (int channel = 0; channel < totalNumInputChannels; ++channel) {
-    auto* channelData = buffer.getWritePointer(channel);
-    juce::ignoreUnused(channelData);
-    // ..do something to the data...
+  // --- ステレオバイクアッドフィルタ処理 ---
+  for (size_t channel = 0; channel < totalNumInputChannels; ++channel) {
+    float* channelData = buffer.getWritePointer(static_cast<int>(channel));
+    int numSamples = buffer.getNumSamples();
+
+    // チャンネルごとの状態変数を取得
+    float x1 = xHistory[channel][0];
+    float x2 = xHistory[channel][1];
+    float y1 = yHistory[channel][0];
+    float y2 = yHistory[channel][1];
+
+    for (int n = 0; n < numSamples; ++n) {
+      float x0 = channelData[n];
+      // Difference Equation: y[n] = (b0*x[n] + b1*x[n-1] + b2*x[n-2] -
+      // a1*y[n-1] - a2*y[n-2]) / a0
+      float y0 = (filterB[0] * x0 + filterB[1] * x1 + filterB[2] * x2 -
+                  filterA[1] * y1 - filterA[2] * y2) /
+                 filterA[0];
+      channelData[n] = y0;
+      // 状態を更新
+      x2 = x1;
+      x1 = x0;
+      y2 = y1;
+      y1 = y0;
+    }
+    // 計算後の状態を保存
+    xHistory[channel][0] = x1;
+    xHistory[channel][1] = x2;
+    yHistory[channel][0] = y1;
+    yHistory[channel][1] = y2;
   }
 }
 
+// エディタ（UI）があるかどうか
 bool AudioPluginAudioProcessor::hasEditor() const {
-  return true;  // (change this to false if you choose to not supply an editor)
+  return true;
 }
 
+// パラメータスライダーを自動生成する汎用UIを返す
 juce::AudioProcessorEditor* AudioPluginAudioProcessor::createEditor() {
-  return new AudioPluginAudioProcessorEditor(*this);
+  return new juce::GenericAudioProcessorEditor(*this);
 }
 
 void AudioPluginAudioProcessor::getStateInformation(

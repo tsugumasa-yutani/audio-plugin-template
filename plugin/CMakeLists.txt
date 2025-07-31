@@ -11,7 +11,7 @@ set(INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include/YourPluginName")
 juce_add_plugin(
   ${PROJECT_NAME}
   COMPANY_NAME
-  "MyCompany" # change this
+  "TsugumasaYutani" # change this
   IS_SYNTH
   FALSE # may change this
   NEEDS_MIDI_INPUT
@@ -31,6 +31,7 @@ juce_add_plugin(
 
 # Sets the source files of the plugin project.
 set(SOURCE_FILES source/PluginEditor.cpp source/PluginProcessor.cpp)
+
 # Optional; includes header files in the project file tree in Visual Studio
 set(HEADER_FILES ${INCLUDE_DIR}/PluginEditor.h ${INCLUDE_DIR}/PluginProcessor.h)
 target_sources(${PROJECT_NAME} PRIVATE ${SOURCE_FILES} ${HEADER_FILES})
@@ -43,7 +44,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/in
 target_link_libraries_system(${PROJECT_NAME} PUBLIC juce::juce_audio_utils)
 target_link_libraries(
   ${PROJECT_NAME} PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags
-                         juce::juce_recommended_warning_flags
+  juce::juce_recommended_warning_flags
 )
 
 # These definitions are recommended by JUCE.
@@ -55,3 +56,27 @@ set_source_files_properties(${SOURCE_FILES} PROPERTIES COMPILE_OPTIONS "${PROJEC
 
 # In Visual Studio this command provides a nice grouping of source files in "filters".
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+# =============================
+# VST3 bundle auto-copy feature (for macOS)
+if(APPLE)
+  set(VST3_BUNDLE_NAME "YourPluginName.vst3")
+  set(VST3_PATH "${CMAKE_CURRENT_BINARY_DIR}/AudioPlugin_artefacts/VST3/${VST3_BUNDLE_NAME}")
+  set(VST3_USER_DIR "$ENV{HOME}/Library/Audio/Plug-Ins/VST3")
+
+  add_custom_target(copy_vst3 ALL
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${VST3_USER_DIR}"
+    COMMAND /bin/sh -c "if [ -d '${VST3_PATH}' ]; then \
+            if [ -d '${VST3_USER_DIR}/${VST3_BUNDLE_NAME}' ]; then \
+                rm -rf '${VST3_USER_DIR}/${VST3_BUNDLE_NAME}'; \
+            fi; \
+            ${CMAKE_COMMAND} -E copy_directory '${VST3_PATH}' '${VST3_USER_DIR}/${VST3_BUNDLE_NAME}'; \
+            codesign --force --deep --sign - '${VST3_USER_DIR}/${VST3_BUNDLE_NAME}'; \
+        else \
+            echo 'VST3 bundle not found.'; \
+        fi"
+    DEPENDS ${PROJECT_NAME} "${VST3_PATH}" ${SOURCE_FILES} ${HEADER_FILES}
+    COMMENT "Automatically copy and codesign VST3 bundle to user plugin folder after build"
+    VERBATIM
+  )
+endif()

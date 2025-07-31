@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -35,7 +35,25 @@ public:
   void getStateInformation(juce::MemoryBlock& destData) override;
   void setStateInformation(const void* data, int sizeInBytes) override;
 
+public:
+  // パラメータ管理用のメンバ変数（JUCE Generic
+  // UIで自動認識されるようapvtsに変更）
+  juce::AudioProcessorValueTreeState apvts;
+
 private:
+  // ステレオバイクアッド用の状態変数（各チャンネルごとに2つずつ）
+  // xHistory: 入力履歴 [チャンネル][2], yHistory: 出力履歴 [チャンネル][2]
+  std::vector<std::array<float, 2>> xHistory;
+  std::vector<std::array<float, 2>> yHistory;
+
+  // 前回のパラメータ値とフィルタ係数を保存する変数
+  // prevCutoff, prevQ, prevFilterType: 前回のパラメータ値
+  // filterB, filterA: フィルタ係数
+  float prevCutoff = -1.0f;
+  float prevQ = -1.0f;
+  int prevFilterType = -1;
+  float filterB[3] = {0.0f, 0.0f, 0.0f};
+  float filterA[3] = {0.0f, 0.0f, 0.0f};
   JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioPluginAudioProcessor)
 };
 }  // namespace audio_plugin
